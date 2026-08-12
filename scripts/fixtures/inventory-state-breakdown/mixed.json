@@ -1,0 +1,4 @@
+{
+  "snapshot": {"source":"canonical_base","generated_at":"2026-08-12T12:00:00Z","observed_at":"2026-08-12T12:00:05Z","items":[{"lifecycle":"ready_to_earn","verification_ready":true},{"lifecycle":"ready_to_earn","verification_ready":false},{"lifecycle":"in_progress","verification_ready":true},{"lifecycle":"submitted","verification_ready":true},{"lifecycle":"paid","verification_ready":true}]},
+  "expected": {"schema":"inventory-state-breakdown-v1","generated_at":"2026-08-12T12:00:00Z","observed_at":"2026-08-12T12:00:05Z","source":"canonical_base","source_available":true,"counts":{"ready_to_earn":1,"in_progress":1,"submitted":1,"paid":1,"verification_unavailable":1}}
+}
