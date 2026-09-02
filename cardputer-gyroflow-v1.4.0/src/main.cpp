@@ -2145,7 +2145,7 @@ void loop() {
     serviceRecordFlow();
     updatePowerTelemetry();
 
-    if (gWriteFailed) {
+    if (gWriteFailed && gLogFile) {
         requestStopRecording();
         gRecordFlowState = RecordFlowState::kClosing;
     }
