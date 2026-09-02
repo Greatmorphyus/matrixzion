@@ -1,0 +1,11 @@
+Third-party notices
+
+The Canon BLE remote protocol implementation is adapted from
+maxmacstn/ESP32-Canon-BLE-Remote:
+https://github.com/maxmacstn/ESP32-Canon-BLE-Remote
+
+That project is distributed under the MIT License. Its license text is included
+in licenses/ESP32_Canon_BLE_Remote_LICENSE.md.
+
+The BMI270 driver is the Bosch Sensortec BMI270 SensorAPI. Its license text is
+included in licenses/Bosch_BMI270_SensorAPI_LICENSE.txt.
