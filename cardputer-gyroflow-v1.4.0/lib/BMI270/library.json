@@ -1,0 +1,8 @@
+{
+  "name": "BMI270",
+  "version": "1.0.0",
+  "description": "Bosch BMI270 SensorAPI used by Cardputer ADV Gyroflow Logger",
+  "build": {
+    "srcDir": "src"
+  }
+}
