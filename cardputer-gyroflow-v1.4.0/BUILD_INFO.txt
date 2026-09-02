@@ -1,0 +1,13 @@
+Cardputer ADV Gyroflow Logger v1.4.0
+
+Base: v1.3.1 stable BMI270 logger
+Target: M5Stack Cardputer ADV / StampS3
+Sensor: BMI270
+Gyroscope: 800 Hz, 2000 dps, OSR4 high performance
+Accelerometer: 800 Hz, 16 g, OSR2
+FIFO: combined accel + gyro, header mode, BMI270 sensor time
+GCSV orientation: Zxy
+File layout: /GYRO/SESSION/SESSION_001.gcsv
+Remote: Canon BR-E1 compatible BLE
+Start sequence: gyro log, 1000 ms pre-roll, Canon trigger
+Stop sequence: Canon trigger, 1000 ms post-roll, close gyro log
