@@ -6,8 +6,12 @@ on:
       - codex/cardputer-gyroflow-v1.4.0
     paths:
       - cardputer-gyroflow-v1.4.0/**
+      - '!cardputer-gyroflow-v1.4.0/releases/**'
       - .github/workflows/cardputer-gyroflow-v1.4.0.yml
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -16,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: codex/cardputer-gyroflow-v1.4.0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,15 +36,26 @@ jobs:
 
       - name: Package deliverables
         run: |
-          mkdir -p dist
-          cp cardputer-gyroflow-v1.4.0/.pio/build/m5stack-stamps3/firmware.bin dist/Cardputer_ADV_Gyroflow_v1.4.0.bin
-          git archive --format=zip --prefix=Cardputer_ADV_Gyroflow_v1.4.0/ -o dist/Cardputer_ADV_Gyroflow_v1.4.0_Source.zip HEAD:cardputer-gyroflow-v1.4.0
-          sha256sum dist/* > dist/SHA256SUMS.txt
+          mkdir -p cardputer-gyroflow-v1.4.0/releases
+          cp cardputer-gyroflow-v1.4.0/.pio/build/m5stack-stamps3/firmware.bin cardputer-gyroflow-v1.4.0/releases/Cardputer_ADV_Gyroflow_v1.4.0.bin
+          git archive --format=zip --prefix=Cardputer_ADV_Gyroflow_v1.4.0/ -o cardputer-gyroflow-v1.4.0/releases/Cardputer_ADV_Gyroflow_v1.4.0_Source.zip HEAD:cardputer-gyroflow-v1.4.0
+          cd cardputer-gyroflow-v1.4.0/releases
+          sha256sum Cardputer_ADV_Gyroflow_v1.4.0.bin Cardputer_ADV_Gyroflow_v1.4.0_Source.zip > SHA256SUMS.txt
 
-      - name: Upload firmware
+      - name: Publish build outputs to branch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add cardputer-gyroflow-v1.4.0/releases
+          if ! git diff --cached --quiet; then
+            git commit -m 'build Cardputer Gyroflow v1.4.0'
+            git push origin HEAD:codex/cardputer-gyroflow-v1.4.0
+          fi
+
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: Cardputer-ADV-Gyroflow-v1.4.0
-          path: dist/*
+          path: cardputer-gyroflow-v1.4.0/releases/*
           if-no-files-found: error
           retention-days: 30
