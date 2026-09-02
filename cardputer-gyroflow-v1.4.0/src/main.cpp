@@ -1,11 +1,10 @@
 #include <Arduino.h>
-#include <BLEDevice.h>
 #include <FS.h>
 #include <M5Cardputer.h>
+#include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <SD.h>
 #include <SPI.h>
-#include <esp_gap_ble_api.h>
 
 #include "bmi270.h"
 
@@ -17,7 +16,7 @@
 
 namespace {
 
-constexpr char kFirmwareVersion[] = "1.4.0";
+constexpr char kFirmwareVersion[] = "1.4.1";
 constexpr char kOrientation[] = "Zxy";
 constexpr uint32_t kCameraPreRollMs = 1000;
 constexpr uint32_t kCameraPostRollMs = 1000;
@@ -98,6 +97,31 @@ enum class CameraCommandType : uint8_t {
     kConnect,
     kPair,
     kTrigger,
+};
+
+enum class CameraPairStage : uint8_t {
+    kIdle,
+    kScanning,
+    kFound,
+    kConnecting,
+    kSecuring,
+    kIdentifying,
+    kControl,
+    kComplete,
+};
+
+enum class CameraError : uint8_t {
+    kNone,
+    kInit,
+    kScanStart,
+    kNotFound,
+    kConnect,
+    kSecure,
+    kService,
+    kIdentityCharacteristic,
+    kIdentityWrite,
+    kControlCharacteristic,
+    kSave,
 };
 
 enum class RecordFlowState : uint8_t {
@@ -274,67 +298,63 @@ int16_t gPowerHistory[kPowerHistorySamples]{};
 size_t gPowerHistoryHead = 0;
 size_t gPowerHistoryCount = 0;
 
-class CanonSecurityCallbacks : public BLESecurityCallbacks {
+volatile CameraPairStage gCameraPairStage = CameraPairStage::kIdle;
+volatile CameraError gCameraError = CameraError::kNone;
+bool gPairQueued = false;
+
+class CanonConnectionCallbacks : public NimBLEClientCallbacks {
 public:
-    uint32_t onPassKeyRequest() override {
-        return 123456;
+    CanonConnectionCallbacks(volatile bool* connected, volatile bool* encrypted)
+        : connected_(connected), encrypted_(encrypted) {
     }
 
-    void onPassKeyNotify(uint32_t) override {
-    }
-
-    bool onConfirmPIN(uint32_t) override {
-        return true;
-    }
-
-    bool onSecurityRequest() override {
-        return true;
-    }
-
-    void onAuthenticationComplete(esp_ble_auth_cmpl_t) override {
-    }
-};
-
-class CanonConnectionCallbacks : public BLEClientCallbacks {
-public:
-    explicit CanonConnectionCallbacks(volatile bool* connected)
-        : connected_(connected) {
-    }
-
-    void onConnect(BLEClient*) override {
+    void onConnect(NimBLEClient*) override {
         *connected_ = true;
     }
 
-    void onDisconnect(BLEClient*) override {
+    void onDisconnect(NimBLEClient*, int) override {
         *connected_ = false;
+        *encrypted_ = false;
+    }
+
+    void onAuthenticationComplete(NimBLEConnInfo& connectionInfo) override {
+        *encrypted_ = connectionInfo.isEncrypted();
+    }
+
+    void onConfirmPasskey(NimBLEConnInfo& connectionInfo, uint32_t) override {
+        NimBLEDevice::injectConfirmPasskey(connectionInfo, true);
+    }
+
+    void onPassKeyEntry(NimBLEConnInfo& connectionInfo) override {
+        NimBLEDevice::injectPassKey(connectionInfo, 123456);
     }
 
 private:
     volatile bool* connected_;
+    volatile bool* encrypted_;
 };
 
-class CanonScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+class CanonScanCallbacks : public NimBLEScanCallbacks {
 public:
-    CanonScanCallbacks(const BLEUUID& target, bool* found, char* address, size_t addressSize)
-        : target_(target), found_(found), address_(address), addressSize_(addressSize) {
+    CanonScanCallbacks(const NimBLEUUID& target, bool* found, NimBLEAddress* address)
+        : target_(target), found_(found), address_(address) {
     }
 
-    void onResult(BLEAdvertisedDevice advertisedDevice) override {
-        if (!advertisedDevice.haveServiceUUID() ||
-            !target_.equals(advertisedDevice.getServiceUUID())) {
+    void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
+        if (advertisedDevice == nullptr ||
+            !advertisedDevice->isAdvertisingService(target_)) {
             return;
         }
-        const std::string address = advertisedDevice.getAddress().toString();
-        std::snprintf(address_, addressSize_, "%s", address.c_str());
+        *address_ = advertisedDevice->getAddress();
         *found_ = true;
-        BLEDevice::getScan()->stop();
+        gCameraPairStage = CameraPairStage::kFound;
+        NimBLEDevice::getScan()->stop();
     }
 
 private:
-    BLEUUID target_;
+    NimBLEUUID target_;
     bool* found_;
-    char* address_;
-    size_t addressSize_;
+    NimBLEAddress* address_;
 };
 
 class CanonRemote {
@@ -343,25 +363,47 @@ public:
         : serviceUuid_("00050000-0000-1000-0000-d8492fffa821"),
           pairingUuid_("00050002-0000-1000-0000-d8492fffa821"),
           triggerUuid_("00050003-0000-1000-0000-d8492fffa821"),
-          connectionCallbacks_(&connected_) {
+          connectionCallbacks_(&connected_, &encrypted_) {
     }
 
     bool begin() {
-        BLEDevice::init("ADV GYRO");
-        BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
-        BLEDevice::setSecurityCallbacks(new CanonSecurityCallbacks());
-        client_ = BLEDevice::createClient();
-        if (client_ == nullptr) {
+        const uint32_t shortId = static_cast<uint32_t>(ESP.getEfuseMac()) & 0xFFFFFU;
+        std::snprintf(deviceName_, sizeof(deviceName_), "ADV-GYRO-%05lX",
+                      static_cast<unsigned long>(shortId));
+        if (!NimBLEDevice::init(deviceName_)) {
+            setError(CameraError::kInit);
             return false;
         }
-        client_->setClientCallbacks(&connectionCallbacks_);
+
+        // Match the security and identity handling used by current BR-E1
+        // compatible controllers. Bonding and identity keys are required for
+        // modern Canon cameras that rotate resolvable private addresses.
+        NimBLEDevice::setSecurityAuth(true, true, true);
+        NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_YESNO);
+        NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC |
+                                         BLE_SM_PAIR_KEY_DIST_ID);
+        NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC |
+                                         BLE_SM_PAIR_KEY_DIST_ID);
+        NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT);
+        NimBLEDevice::setPower(3);
+
+        client_ = NimBLEDevice::createClient();
+        if (client_ == nullptr) {
+            setError(CameraError::kInit);
+            return false;
+        }
+        client_->setClientCallbacks(&connectionCallbacks_, false);
+        client_->setConnectTimeout(10000);
+        client_->setConnectionParams(12, 24, 1, 800);
 
         Preferences preferences;
         if (preferences.begin("advgyro", true)) {
             address_ = preferences.getString("cameraaddr", "");
+            addressType_ = preferences.getUChar("cameratype", BLE_ADDR_PUBLIC);
             preferences.end();
         }
         initialized_ = true;
+        clearError();
         return true;
     }
 
@@ -375,6 +417,7 @@ public:
 
     bool connect() {
         if (!initialized_ || !hasPairedCamera() || client_ == nullptr) {
+            setError(CameraError::kInit);
             return false;
         }
         if (isConnected() && triggerCharacteristic_ != nullptr) {
@@ -382,22 +425,54 @@ public:
         }
 
         disconnect();
-        BLEAddress address(address_.c_str());
+        gCameraPairStage = CameraPairStage::kConnecting;
+        NimBLEAddress address(std::string(address_.c_str()), addressType_);
         if (!client_->connect(address)) {
+            setError(CameraError::kConnect);
             return false;
         }
 
-        BLERemoteService* service = client_->getService(serviceUuid_);
+        gCameraPairStage = CameraPairStage::kSecuring;
+        if (!client_->secureConnection()) {
+            setError(CameraError::kSecure);
+            disconnect();
+            return false;
+        }
+        encrypted_ = true;
+
+        NimBLERemoteService* service = client_->getService(serviceUuid_);
         if (service == nullptr) {
+            setError(CameraError::kService);
             disconnect();
             return false;
         }
 
+        gCameraPairStage = CameraPairStage::kIdentifying;
+        NimBLERemoteCharacteristic* pairing = service->getCharacteristic(pairingUuid_);
+        if (pairing == nullptr) {
+            setError(CameraError::kIdentityCharacteristic);
+            disconnect();
+            return false;
+        }
+        uint8_t payload[1 + sizeof(deviceName_)]{};
+        const size_t nameLength = std::strlen(deviceName_);
+        payload[0] = 0x03;
+        std::memcpy(payload + 1, deviceName_, nameLength);
+        if (!pairing->writeValue(payload, nameLength + 1, true)) {
+            setError(CameraError::kIdentityWrite);
+            disconnect();
+            return false;
+        }
+
+        gCameraPairStage = CameraPairStage::kControl;
         triggerCharacteristic_ = service->getCharacteristic(triggerUuid_);
         if (triggerCharacteristic_ == nullptr) {
+            setError(CameraError::kControlCharacteristic);
             disconnect();
             return false;
         }
+        gCameraPairStage = CameraPairStage::kComplete;
+        clearError();
         return true;
     }
 
@@ -407,65 +482,60 @@ public:
         }
 
         disconnect();
-        BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+        clearError();
+        gCameraPairStage = CameraPairStage::kScanning;
 
         bool found = false;
-        char foundAddress[18]{};
-        CanonScanCallbacks callbacks(serviceUuid_, &found, foundAddress, sizeof(foundAddress));
-        BLEScan* scan = BLEDevice::getScan();
-        scan->setAdvertisedDeviceCallbacks(&callbacks);
+        NimBLEAddress foundAddress;
+        CanonScanCallbacks callbacks(serviceUuid_, &found, &foundAddress);
+        NimBLEScan* scan = NimBLEDevice::getScan();
+        scan->setScanCallbacks(&callbacks, false);
         scan->setActiveScan(true);
-        scan->start(scanSeconds, false);
-        scan->stop();
+        scan->setInterval(80);
+        scan->setWindow(80);
+        scan->setMaxResults(16);
+        const bool scanStarted = scan->start(scanSeconds * 1000U, false, true);
+        if (!scanStarted) {
+            setError(CameraError::kScanStart);
+            scan->setScanCallbacks(nullptr, false);
+            return false;
+        }
+        while (scan->isScanning()) {
+            delay(10);
+        }
+        scan->setScanCallbacks(nullptr, false);
         scan->clearResults();
 
-        if (!found || std::strlen(foundAddress) != 17) {
-            BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
+        if (!found || foundAddress.isNull()) {
+            setError(CameraError::kNotFound);
             return false;
         }
 
-        address_ = foundAddress;
-        BLEAddress address(address_.c_str());
-        if (!client_->connect(address)) {
-            BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
+        address_ = foundAddress.toString().c_str();
+        addressType_ = foundAddress.getType();
+        if (!connect()) {
             return false;
         }
-
-        BLERemoteService* service = client_->getService(serviceUuid_);
-        if (service == nullptr) {
-            disconnect();
-            BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
-            return false;
-        }
-
-        BLERemoteCharacteristic* pairing = service->getCharacteristic(pairingUuid_);
-        if (pairing == nullptr) {
-            disconnect();
-            BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
-            return false;
-        }
-
-        const char deviceName[] = " ADV GYRO ";
-        uint8_t payload[sizeof(deviceName) - 1]{};
-        std::memcpy(payload, deviceName, sizeof(payload));
-        payload[0] = 0x03;
-        pairing->writeValue(payload, sizeof(payload), false);
-        delay(250);
-        disconnect();
-        BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
 
         Preferences preferences;
         bool saved = false;
         if (preferences.begin("advgyro", false)) {
-            saved = preferences.putString("cameraaddr", address_) == address_.length();
+            const bool addressSaved =
+                preferences.putString("cameraaddr", address_) == address_.length();
+            const bool typeSaved =
+                preferences.putUChar("cameratype", addressType_) == sizeof(uint8_t);
+            saved = addressSaved && typeSaved;
             preferences.end();
         }
         if (!saved) {
+            setError(CameraError::kSave);
+            disconnect();
             return false;
         }
 
-        delay(250);
-        return connect();
+        gCameraPairStage = CameraPairStage::kComplete;
+        clearError();
+        return true;
     }
 
     bool trigger() {
@@ -475,30 +545,51 @@ public:
 
         uint8_t pressed = 0x8C;
         uint8_t released = 0x0C;
-        triggerCharacteristic_->writeValue(&pressed, 1, false);
+        if (!triggerCharacteristic_->writeValue(&pressed, 1, true)) {
+            setError(CameraError::kControlCharacteristic);
+            disconnect();
+            return false;
+        }
         delay(200);
-        triggerCharacteristic_->writeValue(&released, 1, false);
+        if (!triggerCharacteristic_->writeValue(&released, 1, true)) {
+            setError(CameraError::kControlCharacteristic);
+            disconnect();
+            return false;
+        }
         delay(50);
+        clearError();
         return true;
     }
 
 private:
+    void clearError() {
+        gCameraError = CameraError::kNone;
+    }
+
+    void setError(CameraError error) {
+        gCameraError = error;
+    }
+
     void disconnect() {
         triggerCharacteristic_ = nullptr;
         if (client_ != nullptr && client_->isConnected()) {
             client_->disconnect();
         }
         connected_ = false;
+        encrypted_ = false;
     }
 
-    BLEUUID serviceUuid_;
-    BLEUUID pairingUuid_;
-    BLEUUID triggerUuid_;
-    BLEClient* client_ = nullptr;
-    BLERemoteCharacteristic* triggerCharacteristic_ = nullptr;
+    NimBLEUUID serviceUuid_;
+    NimBLEUUID pairingUuid_;
+    NimBLEUUID triggerUuid_;
+    NimBLEClient* client_ = nullptr;
+    NimBLERemoteCharacteristic* triggerCharacteristic_ = nullptr;
     volatile bool connected_ = false;
+    volatile bool encrypted_ = false;
     CanonConnectionCallbacks connectionCallbacks_;
     String address_;
+    uint8_t addressType_ = BLE_ADDR_PUBLIC;
+    char deviceName_[20]{};
     bool initialized_ = false;
 };
 
@@ -1262,10 +1353,10 @@ void cameraTask(void*) {
         gCameraLastCommandOk = result;
         if (result) {
             gCameraState = CameraState::kReady;
-        } else if (!gCanonRemote.hasPairedCamera()) {
-            gCameraState = CameraState::kUnpaired;
         } else if (command.type == CameraCommandType::kPair) {
             gCameraState = CameraState::kFault;
+        } else if (!gCanonRemote.hasPairedCamera()) {
+            gCameraState = CameraState::kUnpaired;
         } else {
             gCameraState = CameraState::kDisconnected;
         }
@@ -1465,12 +1556,19 @@ void updateInputs() {
     if (sdRetryPressed && gSamplerState == SamplerState::kIdle && !gLogFile) {
         gSdReady = initializeSd();
     }
-    if (pairPressed && gSamplerState == SamplerState::kIdle && !gLogFile &&
+    if (pairPressed && gCameraState != CameraState::kPairing &&
+        gCameraState != CameraState::kConnecting &&
+        gCameraState != CameraState::kSending) {
+        gPairQueued = true;
+    }
+    if (gPairQueued && gSamplerState == SamplerState::kIdle && !gLogFile &&
         gRecordFlowState == RecordFlowState::kIdle &&
         gCameraState != CameraState::kPairing &&
         gCameraState != CameraState::kConnecting &&
         gCameraState != CameraState::kSending) {
-        queueCameraCommand(CameraCommandType::kPair);
+        if (queueCameraCommand(CameraCommandType::kPair) != 0) {
+            gPairQueued = false;
+        }
     }
     if (newSessionPressed && gSamplerState == SamplerState::kIdle && !gLogFile &&
         gRecordFlowState == RecordFlowState::kIdle) {
@@ -1519,15 +1617,54 @@ const char* cameraLongStatus() {
         case CameraState::kReady:
             return "CAM READY";
         case CameraState::kUnpaired:
-            return "P TO PAIR";
+            return gPairQueued ? "PAIR QUEUED" : "P TO PAIR";
         case CameraState::kConnecting:
-            return "CAM LINKING";
-        case CameraState::kPairing:
-            return "CAM PAIRING";
+        case CameraState::kPairing: {
+            switch (gCameraPairStage) {
+                case CameraPairStage::kScanning:
+                    return "SCAN CAMERA";
+                case CameraPairStage::kFound:
+                    return "CAM FOUND";
+                case CameraPairStage::kConnecting:
+                    return "CAM LINK";
+                case CameraPairStage::kSecuring:
+                    return "CAM SECURE";
+                case CameraPairStage::kIdentifying:
+                    return "CAM IDENT";
+                case CameraPairStage::kControl:
+                    return "CAM CONTROL";
+                default:
+                    return "CAM PAIRING";
+            }
+        }
         case CameraState::kSending:
             return "CAM COMMAND";
-        case CameraState::kFault:
-            return "CAM RETRY";
+        case CameraState::kFault: {
+            switch (gCameraError) {
+                case CameraError::kInit:
+                    return "E1 BLE INIT";
+                case CameraError::kScanStart:
+                    return "E2 SCAN";
+                case CameraError::kNotFound:
+                    return "E3 NOT FOUND";
+                case CameraError::kConnect:
+                    return "E4 CONNECT";
+                case CameraError::kSecure:
+                    return "E5 SECURE";
+                case CameraError::kService:
+                    return "E6 SERVICE";
+                case CameraError::kIdentityCharacteristic:
+                    return "E7 ID CHAR";
+                case CameraError::kIdentityWrite:
+                    return "E8 ID WRITE";
+                case CameraError::kControlCharacteristic:
+                    return "E9 CONTROL";
+                case CameraError::kSave:
+                    return "E10 STORAGE";
+                default:
+                    return "CAM RETRY";
+            }
+        }
         default:
             return "CAM OFFLINE";
     }

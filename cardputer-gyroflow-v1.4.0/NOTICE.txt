@@ -1,11 +1,17 @@
 Third-party notices
 
-The Canon BLE remote protocol implementation is adapted from
-maxmacstn/ESP32-Canon-BLE-Remote:
-https://github.com/maxmacstn/ESP32-Canon-BLE-Remote
+The Canon BLE remote protocol implementation is based on the current
+Canon EOS Remote implementation from furble:
+https://github.com/gkoh/furble
 
 That project is distributed under the MIT License. Its license text is included
-in licenses/ESP32_Canon_BLE_Remote_LICENSE.md.
+in licenses/Furble_LICENSE.md.
+
+Bluetooth transport uses NimBLE-Arduino:
+https://github.com/h2zero/NimBLE-Arduino
+
+NimBLE-Arduino is distributed under the Apache License 2.0. Its license text is
+included in licenses/NimBLE_Arduino_LICENSE.txt.
 
 The BMI270 driver is the Bosch Sensortec BMI270 SensorAPI. Its license text is
 included in licenses/Bosch_BMI270_SensorAPI_LICENSE.txt.

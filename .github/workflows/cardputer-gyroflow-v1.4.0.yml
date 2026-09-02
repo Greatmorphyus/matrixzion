@@ -1,4 +1,4 @@
-name: Build Cardputer Gyroflow v1.4.0
+name: Build Cardputer Gyroflow v1.4.1
 
 on:
   push:
@@ -37,10 +37,10 @@ jobs:
       - name: Package deliverables
         run: |
           mkdir -p cardputer-gyroflow-v1.4.0/releases
-          cp cardputer-gyroflow-v1.4.0/.pio/build/m5stack-stamps3/firmware.bin cardputer-gyroflow-v1.4.0/releases/Cardputer_ADV_Gyroflow_v1.4.0.bin
-          git archive --format=zip --prefix=Cardputer_ADV_Gyroflow_v1.4.0/ -o cardputer-gyroflow-v1.4.0/releases/Cardputer_ADV_Gyroflow_v1.4.0_Source.zip HEAD:cardputer-gyroflow-v1.4.0
+          cp cardputer-gyroflow-v1.4.0/.pio/build/m5stack-stamps3/firmware.bin cardputer-gyroflow-v1.4.0/releases/Cardputer_ADV_Gyroflow_v1.4.1.bin
+          git archive --format=zip --prefix=Cardputer_ADV_Gyroflow_v1.4.1/ -o cardputer-gyroflow-v1.4.0/releases/Cardputer_ADV_Gyroflow_v1.4.1_Source.zip HEAD:cardputer-gyroflow-v1.4.0
           cd cardputer-gyroflow-v1.4.0/releases
-          sha256sum Cardputer_ADV_Gyroflow_v1.4.0.bin Cardputer_ADV_Gyroflow_v1.4.0_Source.zip > SHA256SUMS.txt
+          sha256sum Cardputer_ADV_Gyroflow_v1.4.1.bin Cardputer_ADV_Gyroflow_v1.4.1_Source.zip > SHA256SUMS_v1.4.1.txt
 
       - name: Publish build outputs to branch
         run: |
@@ -48,14 +48,14 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add cardputer-gyroflow-v1.4.0/releases
           if ! git diff --cached --quiet; then
-            git commit -m 'build Cardputer Gyroflow v1.4.0'
+            git commit -m 'build Cardputer Gyroflow v1.4.1'
             git push origin HEAD:codex/cardputer-gyroflow-v1.4.0
           fi
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Cardputer-ADV-Gyroflow-v1.4.0
+          name: Cardputer-ADV-Gyroflow-v1.4.1
           path: cardputer-gyroflow-v1.4.0/releases/*
           if-no-files-found: error
           retention-days: 30
