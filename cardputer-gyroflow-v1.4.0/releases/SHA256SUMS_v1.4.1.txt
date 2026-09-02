@@ -1,0 +1,2 @@
+7bcd5fc6be6f6a9f2be0c176a4c91a2ea98cb175bb7aeefac3590acdd586ced8  Cardputer_ADV_Gyroflow_v1.4.1.bin
+f7812bbb7885d1694bf34d0accf67c2307a1eed34ca4faebdcc30e2b393580a8  Cardputer_ADV_Gyroflow_v1.4.1_Source.zip
